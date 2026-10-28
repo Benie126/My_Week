@@ -5,5 +5,5 @@ A Flutter app to organize my weekly class schedule. My data is now saved on the 
 ## Screenshots
 ![Before closing](SCREENSHOTS/before.png)
 ![After running again](SCREENSHOTS/after.png)
-![Live data from an API](SCREENSHOTS/api.PNG)
+![Live data from an API](SCREENSHOTS/Api.PNG)
 ![No internet](SCREENSHOTS/no-internet.png)
