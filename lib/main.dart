@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'firebase_options.dart';
 import 'weather_api.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   runApp(const MyWeekApp());
 }
 
@@ -16,31 +22,62 @@ class MyWeekApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'My Week',
       theme: ThemeData(colorSchemeSeed: Colors.teal),
-      home: const MyWeekScreen(),
+      home: const AuthGate(),
     );
   }
 }
 
+// --- THE GATE ---
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        if (snapshot.data == null) {
+          return const LoginScreen();
+        }
+        return const MyWeekScreen();
+      },
+    );
+  }
+}
+
+// --- THE MODEL ---
 class Course {
-  String name;
-  String day;
-  String time;
+  final String id;
+  final String name;
+  final String day;
+  final String time;
 
-  Course({required this.name, required this.day, required this.time});
+  Course({this.id = '', required this.name, required this.day, required this.time});
 
-  Map<String, dynamic> toJson() {
+  Map<String, dynamic> toMap() {
     return {'name': name, 'day': day, 'time': time};
   }
 
-  factory Course.fromJson(Map<String, dynamic> json) {
+  factory Course.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data()!;
     return Course(
-      name: json['name'] as String,
-      day: json['day'] as String,
-      time: json['time'] as String,
+      id: doc.id,
+      name: data['name'] as String,
+      day: data['day'] as String,
+      time: data['time'] as String,
     );
   }
 }
 
+CollectionReference<Map<String, dynamic>> myCourses() {
+  final uid = FirebaseAuth.instance.currentUser!.uid;
+  return FirebaseFirestore.instance.collection('users').doc(uid).collection('courses');
+}
+
+// --- MAIN SCREEN ---
 class MyWeekScreen extends StatefulWidget {
   const MyWeekScreen({super.key});
 
@@ -49,10 +86,6 @@ class MyWeekScreen extends StatefulWidget {
 }
 
 class _MyWeekScreenState extends State<MyWeekScreen> {
-  List<Course> courses = [];
-  late SharedPreferences prefs;
-  bool isLoadingData = true;
-
   WeatherData? apiWeather;
   bool apiLoading = true;
   String? apiError;
@@ -60,46 +93,7 @@ class _MyWeekScreenState extends State<MyWeekScreen> {
   @override
   void initState() {
     super.initState();
-    initApp();
-  }
-
-  Future<void> initApp() async {
-    // This forces Chrome to use its permanent LocalStorage
-    SharedPreferences.setPrefix('my_week_app_');
-    prefs = await SharedPreferences.getInstance();
-
-    await loadCourses();
-    await loadWeather();
-  }
-
-  Future<void> loadCourses() async {
-    final saved = prefs.getString('my_courses');
-    debugPrint('LOADING: $saved');
-
-    if (saved != null) {
-      final list = jsonDecode(saved) as List;
-      setState(() {
-        courses = list.map((x) => Course.fromJson(x as Map<String, dynamic>)).toList();
-        isLoadingData = false;
-      });
-    } else {
-      setState(() {
-        courses = [
-          Course(name: 'Mobile Programming', day: 'Monday', time: '10:00 AM'),
-          Course(name: 'Database Systems', day: 'Wednesday', time: '2:00 PM'),
-        ];
-        isLoadingData = false;
-      });
-      await saveCourses();
-    }
-  }
-
-  Future<void> saveCourses() async {
-    final list = courses.map((c) => c.toJson()).toList();
-    final jsonString = jsonEncode(list);
-
-    await prefs.setString('my_courses', jsonString);
-    debugPrint('SAVED: $jsonString');
+    loadWeather();
   }
 
   Future<void> loadWeather() async {
@@ -121,23 +115,19 @@ class _MyWeekScreenState extends State<MyWeekScreen> {
     }
   }
 
-  void deleteCourse(int index) {
-    setState(() {
-      courses.removeAt(index);
-    });
-    saveCourses();
-  }
-
-  void showAddCourseDialog() {
-    final nameController = TextEditingController();
-    final dayController = TextEditingController();
-    final timeController = TextEditingController();
+  // --- ADD / EDIT DIALOG ---
+  // If courseToEdit is null, it adds a new course.
+  // If courseToEdit is provided, it updates the existing one.
+  void showCourseDialog({Course? courseToEdit}) {
+    final nameController = TextEditingController(text: courseToEdit?.name ?? '');
+    final dayController = TextEditingController(text: courseToEdit?.day ?? '');
+    final timeController = TextEditingController(text: courseToEdit?.time ?? '');
 
     showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: const Text('Add Course'),
+          title: Text(courseToEdit == null ? 'Add Course' : 'Edit Course'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -152,17 +142,24 @@ class _MyWeekScreenState extends State<MyWeekScreen> {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () {
+              onPressed: () async {
                 if (nameController.text.isNotEmpty) {
-                  setState(() {
-                    courses.add(Course(
-                      name: nameController.text,
-                      day: dayController.text,
-                      time: timeController.text,
-                    ));
-                  });
-                  saveCourses();
-                  Navigator.pop(context);
+                  if (courseToEdit == null) {
+                    // ADD NEW
+                    await myCourses().add({
+                      'name': nameController.text,
+                      'day': dayController.text,
+                      'time': timeController.text,
+                    });
+                  } else {
+                    // EDIT EXISTING
+                    await myCourses().doc(courseToEdit.id).update({
+                      'name': nameController.text,
+                      'day': dayController.text,
+                      'time': timeController.text,
+                    });
+                  }
+                  if (context.mounted) Navigator.pop(context);
                 }
               },
               child: const Text('Save'),
@@ -203,30 +200,55 @@ class _MyWeekScreenState extends State<MyWeekScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('My Week')),
-      body: isLoadingData
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
+      appBar: AppBar(
+        title: const Text('My Week'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Log out',
+            onPressed: () => FirebaseAuth.instance.signOut(),
+          ),
+        ],
+      ),
+      body: Column(
         children: [
           buildWeatherBanner(),
           Expanded(
-            child: courses.isEmpty
-                ? const Center(child: Text('No courses yet. Add one!'))
-                : ListView.builder(
-              itemCount: courses.length,
-              itemBuilder: (context, index) {
-                final course = courses[index];
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  child: ListTile(
-                    leading: const Icon(Icons.book),
-                    title: Text(course.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text('${course.day} at ${course.time}'),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () => deleteCourse(index),
-                    ),
-                  ),
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: myCourses().snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Center(child: Text('Error: ${snapshot.error}'));
+                }
+                if (!snapshot.hasData) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                final courses = snapshot.data!.docs.map(Course.fromDoc).toList();
+
+                if (courses.isEmpty) {
+                  return const Center(child: Text('No courses yet. Add one!'));
+                }
+
+                return ListView.builder(
+                  itemCount: courses.length,
+                  itemBuilder: (context, index) {
+                    final course = courses[index];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      child: ListTile(
+                        leading: const Icon(Icons.book),
+                        title: Text(course.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('${course.day} at ${course.time}'),
+                        // EDIT: Opens the dialog with the course data
+                        onTap: () => showCourseDialog(courseToEdit: course),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () => myCourses().doc(course.id).delete(),
+                        ),
+                      ),
+                    );
+                  },
                 );
               },
             ),
@@ -234,8 +256,126 @@ class _MyWeekScreenState extends State<MyWeekScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: showAddCourseDialog,
+        onPressed: () => showCourseDialog(), // ADD: Opens empty dialog
         child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+// --- LOGIN SCREEN ---
+class LoginScreen extends StatefulWidget {
+  const LoginScreen({super.key});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  Future<void> _submit({required bool newAccount}) async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final auth = FirebaseAuth.instance;
+      if (newAccount) {
+        await auth.createUserWithEmailAndPassword(
+            email: _email.text.trim(), password: _password.text);
+      } else {
+        await auth.signInWithEmailAndPassword(
+            email: _email.text.trim(), password: _password.text);
+      }
+    } on FirebaseAuthException catch (e) {
+      setState(() => _error = _message(e.code));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  String _message(String code) {
+    switch (code) {
+      case 'email-already-in-use':
+        return 'An account with this email already exists. Log in instead.';
+      case 'invalid-credential':
+      case 'wrong-password':
+      case 'user-not-found':
+        return 'Wrong email or password.';
+      case 'weak-password':
+        return 'Choose a stronger password.';
+      case 'network-request-failed':
+        return 'No internet connection.';
+      default:
+        return 'Something went wrong ($code).';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('My Week',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 32),
+                TextFormField(
+                  controller: _email,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: 'Email', border: OutlineInputBorder()),
+                  validator: (v) {
+                    final email = (v ?? '').trim();
+                    if (email.isEmpty) return 'Enter your email';
+                    if (!RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email)) {
+                      return 'Enter a valid email, like aline@gmail.com';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _password,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()),
+                  validator: (v) =>
+                  (v ?? '').length < 6 ? 'At least 6 characters' : null,
+                ),
+                const SizedBox(height: 16),
+                if (_error != null)
+                  Text(_error!, style: const TextStyle(color: Colors.red)),
+                const SizedBox(height: 16),
+                FilledButton(
+                  onPressed: _busy ? null : () => _submit(newAccount: false),
+                  child: const Text('Log in'),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton(
+                  onPressed: _busy ? null : () => _submit(newAccount: true),
+                  child: const Text('Create account'),
+                ),
+                if (_busy)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 16),
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
